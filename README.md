@@ -4,7 +4,8 @@ Stack pixel blocks in your real room through your phone camera, then smash throu
 
 - Tap the screen, or pinch 👌 with your free hand in front of the camera, to place blocks.
 - **⛏️ Dig** breaks through your floor: dirt, then stone with coal and gem ore, with bedrock at the bottom.
-- **📐 Wall** lets you break walls too. Tap two spots along the bottom of a wall to lock it in, then dig through plaster, brick and stone.
+- **🔍 Walls** finds walls by itself. Point at the bottom of a wall with some floor in view: it spots the line where the wall meets the floor, shows it in blue, and locks it in after you hold still for a second (or tap to lock it straight away). Then dig through plaster, brick and stone.
+- If your wall and floor look too alike for it to see, tap two spots along the bottom of the wall instead.
 
 ## Play
 

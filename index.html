@@ -87,7 +87,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     <div class="modes">
       <button id="mBuild" class="mode on">🧱 Build</button>
       <button id="mDig" class="mode">⛏️ Dig</button>
-      <button id="mWall" class="mode">📐 Wall</button>
+      <button id="mWall" class="mode">🔍 Walls</button>
     </div>
     <div id="bar" class="bar"></div>
   </div>
@@ -115,7 +115,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     <ol>
       <li>Stand in one spot. Turn around to look, but don't walk.</li>
       <li>Tap the screen, or pinch 👌 with your free hand in front of the camera, to build. Switch to ⛏️ Dig to break the floor.</li>
-      <li>To break a wall, tap 📐 Wall, then tap two spots along the bottom of the wall.</li>
+      <li>To break a wall, tap 🔍 Walls and point at the bottom of a wall. It finds the wall by itself and locks it in.</li>
     </ol>
     <button id="go" class="primary">Start</button>
     <p id="startMsg" class="hint">Asks for camera and motion access.</p>
@@ -308,7 +308,7 @@ function rebuildChunk(c) {
 }
 
 /* ---------- floor & walls ---------- */
-let hasWalls = false;
+let walls = [];                       // locked walls, as {axis, plane} in room-grid coords
 function newRoom() {
   world.fill(0); flags.fill(0); layer.fill(0);
   for (let y = YMIN; y < 0; y++) for (let z = -R; z <= R; z++) for (let x = -R; x <= R; x++) {
@@ -317,7 +317,7 @@ function newRoom() {
     if (y === YMIN + 1 && Math.random() < .3) v = BEDROCK;
     const i = idx(x, y, z); world[i] = v; flags[i] = NAT; layer[i] = -y;
   }
-  room.rotation.y = 0; hasWalls = false; markAllDirty();
+  room.rotation.y = 0; walls = []; markAllDirty();
 }
 function clearWalls() {
   for (let y = 0; y <= YMAX; y++) for (let z = -R; z <= R; z++) for (let x = -R; x <= R; x++) {
@@ -325,11 +325,9 @@ function clearWalls() {
     if (flags[i] & NAT) world[i] = 0;
     flags[i] = 0; layer[i] = 0;
   }
-  hasWalls = false; markAllDirty();
+  walls = []; markAllDirty();
 }
 function addWall(axis, plane) {     // fills everything from the wall's surface to the edge of the play area
-  if (Math.abs(plane) < 2) return toast('That wall is too close. Step back a little and try again.');
-  if (Math.abs(plane) > R - 1) return toast(`That wall is too far. Stand within ${((R - 1) * BLOCK_CM / 100).toFixed(1)} m of it.`);
   const dir = plane > 0 ? 1 : -1, start = plane > 0 ? plane : plane - 1, H = Math.min(ceilBlocks(), YMAX + 1);
   for (let k = start; k >= -R && k <= R; k += dir) {
     const depth = Math.abs(k - start);
@@ -340,9 +338,28 @@ function addWall(axis, plane) {     // fills everything from the wall's surface 
       flags[i] = NAT; layer[i] = depth + 1;
     }
   }
-  hasWalls = true; markAllDirty(); flashWall(axis, plane, dir, H);
-  sfx('tree'); buzz(); setMode('dig');
-  toast('Wall locked in 🧱 Now smash through it!');
+  markAllDirty(); flashWall(axis, plane, dir, H);
+}
+const UP = new THREE.Vector3(0, 1, 0);
+function planWall(a, b) {             // two floor points along a wall's base (scene space) -> where the wall goes
+  if (Math.hypot(b.x - a.x, b.z - a.z) < 3) return { err: 'Tap two spots farther apart along the wall' };
+  const rot = walls.length ? room.rotation.y : Math.atan2(b.x - a.x, b.z - a.z);   // first wall squares the grid to your room
+  const q = new THREE.Quaternion().setFromAxisAngle(UP, -rot);
+  const la = a.clone().applyQuaternion(q), lb = b.clone().applyQuaternion(q);
+  const dx = Math.abs(lb.x - la.x), dz = Math.abs(lb.z - la.z), alongZ = dz >= dx;
+  if (Math.atan2(Math.min(dx, dz), Math.max(dx, dz)) > .35) return { err: "That wall isn't square with your first wall" };
+  const plane = Math.round(alongZ ? (la.x + lb.x) / 2 : (la.z + lb.z) / 2), axis = alongZ ? 'x' : 'z';
+  if (Math.abs(plane) < 2) return { err: 'That wall is too close. Step back a little.' };
+  if (Math.abs(plane) > R - 1) return { err: `That wall is too far. Stand within ${((R - 1) * BLOCK_CM / 100).toFixed(1)} m of it.` };
+  return { axis, plane, rot, known: walls.some(w => w.axis === axis && Math.abs(w.plane - plane) <= 1) };
+}
+function lockWall(p) {
+  if (p.err) return toast(p.err);
+  if (p.known) return toast('That wall is already locked ✅');
+  if (!walls.length) { room.rotation.y = p.rot; room.updateMatrixWorld(); markAllDirty(); }
+  addWall(p.axis, p.plane); walls.push({ axis: p.axis, plane: p.plane });
+  sfx('tree'); buzz();
+  toast(walls.length === 1 ? 'Wall locked 🧱 Tap ⛏️ Dig to smash it, or point at another wall' : 'Another wall locked 🧱');
 }
 const flashMat = new THREE.MeshBasicMaterial({ color: 0x8fc8ff, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide });
 const flash = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), flashMat); flash.visible = false; room.add(flash);
@@ -435,7 +452,7 @@ function floorPointAt(sx, sy) {           // where a screen point lands on your 
 /* ---------- game actions ---------- */
 let mode = 'build', sel = 1, wallPts = [];
 function act(sx, sy) {
-  if (mode === 'wall') return markWall(sx, sy);
+  if (mode === 'wall') return scan.plan && !scan.plan.err && !wallPts.length ? lockWall(scan.plan) : markWall(sx, sy);
   const h = pickAt(sx, sy);
   if (!h || h.out) return toast(mode === 'dig' ? 'Nothing to break there. Mark a wall with 📐 first to break through it.' : 'Out of reach. Aim at the floor, a marked wall or a block.');
   mode === 'dig' ? dig(h) : build(h);
@@ -464,13 +481,88 @@ function markWall(sx, sy) {
     wallPts.push(p); marker.position.set(p.x, .03, p.z); marker.visible = true; sfx('place');
     return setHint('Now tap a second spot along the bottom of the same wall');
   }
-  const a = wallPts[0], b = p; wallPts = []; marker.visible = false; setHint(HINTS.wall);
-  if (Math.hypot(b.x - a.x, b.z - a.z) < 3) return toast('Tap two spots farther apart along the wall');
-  if (!hasWalls) { room.rotation.y = Math.atan2(b.x - a.x, b.z - a.z); room.updateMatrixWorld(); markAllDirty(); }  // first wall squares the grid to your room
-  invQ.copy(room.quaternion).invert();
-  const la = a.clone().applyQuaternion(invQ), lb = b.clone().applyQuaternion(invQ);
-  const alongZ = Math.abs(lb.z - la.z) >= Math.abs(lb.x - la.x);
-  addWall(alongZ ? 'x' : 'z', Math.round(alongZ ? (la.x + lb.x) / 2 : (la.z + lb.z) / 2));
+  const a = wallPts[0]; wallPts = []; marker.visible = false; setHint(HINTS.wall);
+  lockWall(planWall(a, p));
+}
+
+/* ---------- wall finder: looks for the line where a wall meets the floor ----------
+   Each column of a small camera frame is searched for the strongest change in colour between
+   the pixels just above and just below (wall paint vs floor), only where that spot would be on the
+   floor 0.4 m to 3.5 m away. A straight line is then fitted through those points (RANSAC), and its
+   two ends are projected onto the floor, exactly like two taps.                                  */
+const scan = { plan: null, line: null, stable: 0, t: 0, hold: 0 };
+const scanCv = document.createElement('canvas'), scanCx = scanCv.getContext('2d', { willReadFrequently: true });
+const fv = new THREE.Vector3();
+function floorDist(sx, sy) {
+  fv.set(sx / innerWidth * 2 - 1, -(sy / innerHeight) * 2 + 1, .5).unproject(camera).sub(camera.position);
+  if (fv.y > -1e-4) return Infinity;
+  const t = -camera.position.y / fv.y; return Math.hypot(fv.x * t, fv.z * t);
+}
+function findWall() {
+  const vw = video.videoWidth, vh = video.videoHeight, AW = 120, AH = Math.round(AW * vh / vw), K = 4;
+  if (scanCv.width !== AW || scanCv.height !== AH) { scanCv.width = AW; scanCv.height = AH; }
+  scanCx.drawImage(video, 0, 0, AW, AH);
+  const px = scanCx.getImageData(0, 0, AW, AH).data, N = AW * AH;
+  const C = [new Float32Array(N), new Float32Array(N), new Float32Array(N)];   // 3-px horizontal blur per channel
+  for (let y = 0; y < AH; y++) for (let x = 0; x < AW; x++) for (let c = 0; c < 3; c++) {
+    let s = 0, n = 0; for (let k = -1; k <= 1; k++) { const xx = x + k; if (xx >= 0 && xx < AW) { s += px[(y * AW + xx) * 4 + c]; n++; } }
+    C[c][y * AW + x] = s / n;
+  }
+  const sc = Math.max(innerWidth / vw, innerHeight / vh), ox = (vw * sc - innerWidth) / 2, oy = (vh * sc - innerHeight) / 2;
+  const toSX = x => (x + .5) / AW * vw * sc - ox, toSY = y => (y + .5) / AH * vh * sc - oy;
+  const cand = []; let cols = 0;
+  for (let x = 1; x < AW - 1; x++) {
+    const sx = toSX(x); if (sx < 0 || sx > innerWidth) continue;
+    cols++; let best = 0, by = -1;
+    for (let y = K; y < AH - K; y++) {
+      const sy = toSY(y); if (sy < 0 || sy > innerHeight) continue;
+      const fd = floorDist(sx, sy); if (fd < 2.5 || fd > R - 1) continue;
+      let s = 0;
+      for (let c = 0; c < 3; c++) {
+        let up = 0, dn = 0;
+        for (let k = 1; k <= K; k++) { up += C[c][(y - k) * AW + x]; dn += C[c][(y + k) * AW + x]; }
+        s += Math.abs(up - dn) / K;
+      }
+      if (s > best) { best = s; by = y; }
+    }
+    if (by >= 0 && best > 36) cand.push({ x, y: by, w: best });
+  }
+  if (cand.length < 12) return null;
+  let bestL = null, bestS = 0;
+  for (let it = 0; it < 120; it++) {
+    const p = cand[(Math.random() * cand.length) | 0], q = cand[(Math.random() * cand.length) | 0];
+    if (Math.abs(p.x - q.x) < 8) continue;
+    const a = (q.y - p.y) / (q.x - p.x), b = p.y - a * p.x;
+    if (Math.abs(a) > 1.6) continue;
+    let s = 0, n = 0; for (const c of cand) if (Math.abs(c.y - (a * c.x + b)) <= 1.5) { s += c.w; n++; }
+    if (s > bestS) { bestS = s; bestL = { a, b, n }; }
+  }
+  if (!bestL || bestL.n < Math.max(12, cand.length * .35)) return null;
+  const ins = cand.filter(c => Math.abs(c.y - (bestL.a * c.x + bestL.b)) <= 1.5);
+  let mx = 0, my = 0; for (const c of ins) { mx += c.x; my += c.y; } mx /= ins.length; my /= ins.length;
+  let sxy = 0, sxx = 0; for (const c of ins) { sxy += (c.x - mx) * (c.y - my); sxx += (c.x - mx) ** 2; }
+  const a = sxx ? sxy / sxx : 0, b = my - a * mx;
+  const x1 = Math.min(...ins.map(c => c.x)), x2 = Math.max(...ins.map(c => c.x));
+  if (x2 - x1 < cols * .4) return null;
+  const line = { x1: toSX(x1), y1: toSY(a * x1 + b), x2: toSX(x2), y2: toSY(a * x2 + b) };
+  const A = floorPointAt(line.x1, line.y1), Bp = floorPointAt(line.x2, line.y2);
+  if (!A || !Bp) return null;
+  return { line, plan: planWall(A, Bp) };
+}
+function scanWalls(now) {
+  if (mode !== 'wall' || !camOn || video.readyState < 2 || !video.videoWidth || wallPts.length) { scan.plan = scan.line = null; scan.stable = 0; return; }
+  if (now - scan.t < 110) return;
+  const dt = Math.min(.3, (now - scan.t) / 1000); scan.t = now;
+  let f = null; try { f = findWall(); } catch (e) { console.warn(e); }
+  const prev = scan.plan, p = f && f.plan;
+  const same = p && prev && !p.err && !prev.err && p.axis === prev.axis && Math.abs(p.plane - prev.plane) <= 1 && Math.abs(p.rot - prev.rot) < .12;
+  scan.stable = same ? scan.stable + dt : 0;
+  scan.plan = p || null; scan.line = f ? f.line : null;
+  if (!p) setHint(HINTS.wall);
+  else if (p.err) setHint(p.err);
+  else if (p.known) setHint('That wall is already locked ✅ Point at another one');
+  else setHint('Wall found! Hold still, or tap to lock it');
+  if (p && !p.err && !p.known && scan.stable >= 1.4 && now > scan.hold) { lockWall(p); scan.stable = 0; scan.hold = now + 1500; }
 }
 
 /* ---------- sound & feedback ---------- */
@@ -604,6 +696,17 @@ function detectHands(now) {
 const MODE_COLOR = { build: 'rgba(123,211,79,.85)', dig: 'rgba(255,179,71,.85)', wall: 'rgba(143,200,255,.85)' };
 function drawOverlay() {
   fxc.clearRect(0, 0, innerWidth, innerHeight);
+  if (mode === 'wall' && scan.line) {
+    const { x1, y1, x2, y2 } = scan.line, p = scan.plan;
+    const col = !p || p.err ? 'rgba(255,179,71,.9)' : p.known ? 'rgba(123,211,79,.9)' : 'rgba(143,200,255,.95)';
+    fxc.lineCap = 'round'; fxc.shadowColor = col; fxc.shadowBlur = 12;
+    fxc.strokeStyle = col; fxc.lineWidth = 6; fxc.beginPath(); fxc.moveTo(x1, y1); fxc.lineTo(x2, y2); fxc.stroke();
+    fxc.shadowBlur = 0;
+    if (p && !p.err && !p.known && scan.stable > 0) {
+      const f = Math.min(1, scan.stable / 1.4);
+      fxc.strokeStyle = '#fff'; fxc.lineWidth = 3; fxc.beginPath(); fxc.moveTo(x1, y1); fxc.lineTo(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f); fxc.stroke();
+    }
+  }
   if (!hand.on) return;
   fxc.fillStyle = 'rgba(255,255,255,.55)';
   for (const p of hand.pts) { fxc.beginPath(); fxc.arc(p.x, p.y, 3, 0, 7); fxc.fill(); }
@@ -623,14 +726,15 @@ function updateHighlight() {
 const HINTS = {
   build: 'Tap or pinch to place a block',
   dig: 'Tap or pinch to break the floor, a wall or a block',
-  wall: 'Tap the bottom of a wall, right where it meets the floor',
+  wall: 'Point at the bottom of a wall with some floor in view. Or tap two spots along it.',
 };
 const ITEMS = [1, 2, 3, 12, 4, 5, 6, 7, 8, 13, 'tree'];
 const bar = $('bar');
 function setMode(m) {
-  mode = m; wallPts = []; marker.visible = false;
+  mode = m; wallPts = []; marker.visible = false; scan.plan = scan.line = null; scan.stable = 0;
   for (const [id, k] of [['mBuild', 'build'], ['mDig', 'dig'], ['mWall', 'wall']]) $(id).classList.toggle('on', m === k);
-  bar.classList.toggle('dim', m !== 'build'); setHint(HINTS[m]); updateChip();
+  bar.classList.toggle('dim', m !== 'build'); updateChip();
+  setHint(m === 'wall' && !camOn ? 'Tap two spots along the bottom of a wall' : HINTS[m]);
 }
 ITEMS.forEach(it => {
   const b = document.createElement('button'); b.className = 'slot' + (it === sel ? ' on' : '');
@@ -695,6 +799,7 @@ function frame(now) {
   } else camera.rotation.set(pitch, yaw, 0, 'YXZ');
   camera.updateMatrixWorld();
   detectHands(now);
+  scanWalls(now);
   for (const c of chunks) if (c.dirty) rebuildChunk(c);
   updateHighlight();
   stepParts(dt);
