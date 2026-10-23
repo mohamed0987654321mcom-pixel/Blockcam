@@ -8,7 +8,7 @@ Build and dig on your real floor through your phone camera.
 
 ## Play
 
-Open the GitHub Pages link on your phone, tap **Start**, and allow camera and motion access. The camera only works over `https://`.
+Open **https://mohamed0987654321mcom-pixel.github.io/Blockcam/** on your phone, tap **Start**, and allow camera and motion access. The camera only works over `https://`.
 
 Stand in one spot and turn around. The phone's motion sensor keeps the world steady while you turn, but blocks slide if you walk. If blocks drift as you turn, adjust **Camera lens** in ⚙️.
 
