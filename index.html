@@ -116,7 +116,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
       <li>Stand in one spot. Turn around to look, but don't walk.</li>
       <li>Tap the screen, or pinch 👌 with your free hand in front of the camera, to build. Switch to ⛏️ Dig to break the floor.</li>
       <li>To break a wall, tap 🔍 Walls and point at the bottom of a wall. It finds the wall by itself and locks it in.</li>
-      <li>Turn your free hand palm-up 🤲 to open the mode menu, then touch your thumb to a finger to pick.</li>
+      <li>Turn your free hand palm-up 🤲 to open the mode menu. Pinch, slide left or right, and let go to pick.</li>
     </ol>
     <button id="go" class="primary">Start</button>
     <p id="startMsg" class="hint">Asks for camera and motion access.</p>
@@ -580,6 +580,11 @@ function sfx(kind) {
   if (!actx) return;
   const t = actx.currentTime, g = actx.createGain();
   g.connect(actx.destination);
+  if (kind === 'tick') {
+    const o = actx.createOscillator(); o.type = 'square'; o.frequency.value = 1400;
+    g.gain.setValueAtTime(.05, t); g.gain.exponentialRampToValueAtTime(.001, t + .03);
+    o.connect(g); o.start(t); o.stop(t + .04); return;
+  }
   if (kind === 'tree') {
     const o = actx.createOscillator(); o.type = 'triangle';
     o.frequency.setValueAtTime(300, t); o.frequency.exponentialRampToValueAtTime(900, t + .25);
@@ -669,17 +674,18 @@ function updateChip() {
   if (!settings.hands || handsState === 'off') return setChip('👆 Tap mode');
   if (handsState === 'loading') return setChip('✋ Loading hand tracking…');
   if (handsState === 'failed') return setChip('👆 Hand tracking unavailable');
-  setChip(!hand.on ? '✋ Show your hand to the camera' : menu.open ? '🤲 Touch your thumb to a finger' : '👌 Pinch to use · 🤲 palm up for menu');
+  setChip(!hand.on ? '✋ Show your hand to the camera' : menu.open ? '🤏 Pinch and slide to choose' : '👌 Pinch to use · 🤲 palm up for menu');
 }
 
-/* ---------- palm menu: turn your free hand palm-up, touch thumb to a fingertip to choose ---------- */
+/* ---------- palm menu: turn your free hand palm-up, then pinch, slide left/right, and let go to choose ---------- */
 const MENU = [
-  { tip: 8, pip: 6, mode: 'build', label: '🧱 Build' },
-  { tip: 12, pip: 10, mode: 'dig', label: '⛏️ Dig' },
-  { tip: 16, pip: 14, mode: 'wall', label: '🔍 Walls' },
-  { tip: 20, pip: 18, label: '🔄 Block' },
+  { mode: 'build', label: '🧱 Build' },
+  { mode: 'dig', label: '⛏️ Dig' },
+  { mode: 'wall', label: '🔍 Walls' },
+  { label: '🔄 Block' },
 ];
-const menu = { open: false, up: 0, down: 0, hover: -1, chosen: -1, t: 0, quiet: 0, last: 0 };
+const MENU_STEP = 48;                 // how far (px) your hand slides to move one option
+const menu = { open: false, up: 0, down: 0, sel: 0, grab: null, needDown: false, at: null, t: 0, quiet: 0, last: 0 };
 const pv = i => new THREE.Vector3(i.x, i.y, i.z);
 function palmFacingUp(res, P) {
   const wl = res.worldLandmarks && res.worldLandmarks[0];
@@ -687,7 +693,7 @@ function palmFacingUp(res, P) {
   const label = hd && hd[0] && hd[0].categoryName;
   if (!wl || !label) return false;
   const d = (a, b) => Math.hypot(P[a].x - P[b].x, P[a].y - P[b].y);
-  if (![[8, 5], [12, 9], [16, 13]].every(([t, m]) => d(t, 0) > d(m, 0) * 1.35)) return false;   // fingers open, not a fist
+  if (![[12, 9], [16, 13]].every(([t, m]) => d(t, 0) > d(m, 0) * 1.35)) return false;   // hand open (index may be pinching)
   const W = pv(wl[0]), n = new THREE.Vector3().crossVectors(pv(wl[5]).sub(W), pv(wl[17]).sub(W));
   if (label === 'Right') n.negate();                 // the back camera isn't mirrored, so MediaPipe's left/right labels are swapped
   n.set(n.x, -n.y, -n.z).normalize().applyQuaternion(camera.quaternion);   // hand space -> camera -> room
@@ -703,21 +709,31 @@ function chooseMenu(k) {
   }
   sfx('place'); buzz();
 }
-function updateMenu(now, res, P) {
+function openMenu(now, P) {
+  const xs = P.map(q => q.x), ys = P.map(q => q.y), cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+  menu.open = true; menu.t = now; menu.grab = null;
+  menu.sel = Math.max(0, MENU.findIndex(it => it.mode === mode));
+  menu.at = { x: clamp(cx, 130, innerWidth - 130), y: clamp(Math.min(...ys) - 60, 110, innerHeight - 260) };   // the row stays put while you slide
+  sfx('tree');
+}
+function updateMenu(now, res, P, was) {
   const dt = menu.last ? Math.min(.3, (now - menu.last) / 1000) : 0; menu.last = now;
   if (palmFacingUp(res, P)) { menu.up += dt; menu.down = 0; } else { menu.down += dt; menu.up = 0; }
-  if (!menu.open && menu.up > .25) { menu.open = true; menu.t = now; menu.chosen = -1; hand.pinch = false; sfx('tree'); }
-  if (menu.open && menu.down > .3) { menu.open = false; menu.quiet = now + 600; }
+  if (menu.needDown && menu.down > .3) menu.needDown = false;           // after a pick, turn your palm away before it reopens
+  if (!menu.open && !menu.needDown && menu.up > .25 && !hand.pinch) openMenu(now, P);
   if (!menu.open) return false;
-  const d = (a, b) => Math.hypot(P[a].x - P[b].x, P[a].y - P[b].y), size = d(0, 9) || 1;
-  let best = -1, bd = Infinity;
-  MENU.forEach((it, k) => { const r = d(4, it.tip) / size; if (r < bd) { bd = r; best = k; } });
-  menu.hover = bd < .55 ? best : -1;
-  if (menu.chosen < 0 && bd < .28) { menu.chosen = best; chooseMenu(best); }
-  else if (menu.chosen >= 0 && bd > .45) menu.chosen = -1;      // thumb let go, ready for another pick
+  if (menu.grab) {
+    if (hand.pinch) {
+      const k = clamp(menu.grab.k + Math.round((hand.x - menu.grab.x) / MENU_STEP), 0, MENU.length - 1);
+      if (k !== menu.sel) { menu.sel = k; sfx('tick'); buzz(); }
+    } else {                                                            // let go: choose it
+      chooseMenu(menu.sel); menu.grab = null; menu.open = false; menu.needDown = true; menu.quiet = now + 600;
+    }
+  } else if (hand.pinch && !was) menu.grab = { x: hand.x, k: menu.sel };
+  else if (menu.down > .3) { menu.open = false; menu.quiet = now + 400; }   // palm turned away without choosing
   return true;
 }
-function closeMenu() { menu.open = false; menu.up = menu.down = 0; menu.last = 0; menu.hover = menu.chosen = -1; }
+function closeMenu() { menu.open = false; menu.grab = null; menu.up = menu.down = 0; menu.last = 0; }
 function detectHands(now) {
   if (!hands || !settings.hands || !camOn || video.readyState < 2) { hand.on = false; hand.pinch = false; return; }
   if (now - lastDetect < 66) return;
@@ -735,9 +751,9 @@ function detectHands(now) {
   const cx = (P[4].x + P[8].x) / 2, cy = (P[4].y + P[8].y) / 2;
   if (hand.on) { hand.x += (cx - hand.x) * .6; hand.y += (cy - hand.y) * .6; } else { hand.x = cx; hand.y = cy; }
   hand.on = true; hand.pts = P;
-  if (updateMenu(now, res, P)) { updateChip(); return; }            // menu is open: pinches pick from it instead
   const was = hand.pinch;
   hand.pinch = was ? ratio < .45 : ratio < .28;
+  if (updateMenu(now, res, P, was)) { updateChip(); return; }      // menu is open: the pinch drives it instead of building
   if (now < menu.quiet) { hand.next = now + 450; updateChip(); return; }   // just closed the menu: don't build by accident
   if (hand.pinch && !was) { act(hand.x, hand.y); hand.next = now + 450; }
   else if (hand.pinch && mode !== 'wall' && now > hand.next) { act(hand.x, hand.y); hand.next = now + 380; }
@@ -766,34 +782,29 @@ function drawOverlay() {
   fxc.lineWidth = 3; fxc.strokeStyle = '#fff'; fxc.stroke();
 }
 function drawMenu() {
-  const P = hand.pts, g = Math.min(1, (performance.now() - menu.t) / 160), r = 19 * (.6 + .4 * g);
-  const pos = MENU.map(it => {                        // a round button just past each fingertip
-    const tip = P[it.tip], pip = P[it.pip], L = Math.hypot(tip.x - pip.x, tip.y - pip.y) || 1;
-    return { x: tip.x + (tip.x - pip.x) / L * 30 * g, y: tip.y + (tip.y - pip.y) / L * 30 * g };
-  });
-  for (let n = 0; n < 8; n++) for (let i = 0; i < pos.length; i++) for (let j = i + 1; j < pos.length; j++) {   // nudge apart so they never overlap
-    const a = pos[i], b = pos[j], dx = b.x - a.x, dy = b.y - a.y, dd = Math.hypot(dx, dy) || 1, need = 2 * r + 6;
-    if (dd < need) { const k = (need - dd) / 2 / dd; a.x -= dx * k; a.y -= dy * k; b.x += dx * k; b.y += dy * k; }
-  }
+  const g = Math.min(1, (performance.now() - menu.t) / 160), n = MENU.length, gap = 60, r = 22 * (.6 + .4 * g);
+  const { x: ax, y: ay } = menu.at;
   fxc.textAlign = 'center'; fxc.textBaseline = 'middle';
+  fxc.fillStyle = 'rgba(12,20,15,.6)'; fxc.beginPath(); fxc.roundRect(ax - gap * n / 2, ay - 34, gap * n, 68, 34); fxc.fill();
   MENU.forEach((it, k) => {
-    const p = pos[k], tip = P[it.tip], active = it.mode === mode;
-    p.x = clamp(p.x, r + 4, innerWidth - r - 4); p.y = clamp(p.y, r + 4, innerHeight - r - 4);
-    fxc.strokeStyle = 'rgba(255,255,255,.5)'; fxc.lineWidth = 1.5;
-    fxc.beginPath(); fxc.moveTo(tip.x, tip.y); fxc.lineTo(p.x, p.y); fxc.stroke();
-    fxc.fillStyle = active ? MODE_COLOR[it.mode] : 'rgba(12,20,15,.82)';
-    fxc.beginPath(); fxc.arc(p.x, p.y, r, 0, 7); fxc.fill();
-    fxc.strokeStyle = menu.hover === k ? '#fff' : 'rgba(255,255,255,.25)'; fxc.lineWidth = menu.hover === k ? 3 : 1.5; fxc.stroke();
-    fxc.font = `${Math.round(r * 1.05)}px system-ui, sans-serif`;
-    fxc.fillStyle = '#fff'; fxc.fillText(it.label.split(' ')[0], p.x, p.y + 1);
+    const x = ax + (k - (n - 1) / 2) * gap, on = k === menu.sel, rr = on ? r * 1.25 : r;
+    fxc.fillStyle = it.mode === mode ? MODE_COLOR[it.mode] : 'rgba(12,20,15,.9)';
+    fxc.beginPath(); fxc.arc(x, ay, rr, 0, 7); fxc.fill();
+    fxc.strokeStyle = on ? '#fff' : 'rgba(255,255,255,.25)'; fxc.lineWidth = on ? 3 : 1.5; fxc.stroke();
+    fxc.font = `${Math.round(rr * 1.05)}px system-ui, sans-serif`;
+    fxc.fillStyle = '#fff'; fxc.fillText(it.label.split(' ')[0], x, ay + 1);
   });
-  const h = menu.hover, it = MENU[h];
-  const cap = h < 0 ? 'Touch your thumb to a finger' : it.mode ? it.label : `🔄 Next block (now ${sel === 'tree' ? 'Tree' : B[sel].name})`;
+  const it = MENU[menu.sel];
+  const name = it.mode ? it.label : `🔄 Next block (now ${sel === 'tree' ? 'Tree' : B[sel].name})`;
+  const cap = menu.grab ? name + '  · let go to pick' : 'Pinch, then slide ↔';
   fxc.font = '700 15px "Pixelify Sans", "Courier New", monospace';
-  const w = fxc.measureText(cap).width + 24, cy = Math.min(...pos.map(q => q.y)) - r - 24;
-  const cx = clamp(pos.reduce((a, q) => a + q.x, 0) / pos.length, w / 2 + 6, innerWidth - w / 2 - 6), y = Math.max(20, cy);
-  fxc.fillStyle = 'rgba(12,20,15,.85)'; fxc.beginPath(); fxc.roundRect(cx - w / 2, y - 15, w, 30, 15); fxc.fill();
-  fxc.fillStyle = '#f3f7ee'; fxc.fillText(cap, cx, y + 1);
+  const w = fxc.measureText(cap).width + 24, cx = clamp(ax, w / 2 + 6, innerWidth - w / 2 - 6), cy = ay - 34 - 24;
+  fxc.fillStyle = 'rgba(12,20,15,.88)'; fxc.beginPath(); fxc.roundRect(cx - w / 2, cy - 15, w, 30, 15); fxc.fill();
+  fxc.fillStyle = '#f3f7ee'; fxc.fillText(cap, cx, cy + 1);
+  if (menu.grab) {                                     // a little marker showing where your pinch is
+    fxc.fillStyle = MODE_COLOR[MENU[menu.sel].mode] || 'rgba(255,255,255,.9)';
+    fxc.beginPath(); fxc.arc(hand.x, hand.y, 10, 0, 7); fxc.fill();
+  }
   fxc.textAlign = 'start'; fxc.textBaseline = 'alphabetic';
 }
 function updateHighlight() {
